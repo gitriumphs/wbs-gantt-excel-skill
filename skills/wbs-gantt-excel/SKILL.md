@@ -1,74 +1,42 @@
 ---
 name: wbs-gantt-excel
-description: Generate a Japanese-style WBS / Gantt-chart Excel workbook (項番/タスクのタイトル/担当/SP/開始/終了/期間/完了率 columns, plus a day-by-day calendar grid with month/SP/week bands and colored Gantt bars) from a list of features, each broken into a free-form, ordered list of steps with their own assignee/start date/duration. Use this whenever the user asks to create, build, or update a WBS, スケジュール表, 工程表, or ガントチャート in Excel/xlsx form, especially when sprints ("SP") and Japanese public holidays need to be accounted for in the scheduling. SPs are defined by an explicit per-sprint start/end date list, so sprint lengths can vary freely. Also use it if the user references a WBS file shaped like "dPM WBS" (機能名 groups, each broken into コーディング/実装/試験/リリース-style steps with per-step assignees and business-day durations) and wants a new or refreshed version of it — step names, order, and count are all free-form per feature, and steps within a feature may have gaps between them or overlap. Don't use this for generic/ad-hoc spreadsheets that aren't schedule/timeline-shaped — plain data tables should just be written directly with openpyxl or pandas.
+description: Generate a Japanese-style WBS / Gantt-chart Excel workbook (項番/タスクのタイトル/担当/SP/開始/終了/期間/完了率 columns, plus a day-by-day calendar grid with month/SP/week bands and colored Gantt bars) from a list of features, each broken into a free-form, ordered list of steps with their own assignee/start date/duration. Use this whenever the user asks to create, build, or update a WBS, スケジュール表, 工程表, or ガントチャート in Excel/xlsx form, especially when sprints ("SP") and Japanese public holidays need to be accounted for in the scheduling. SPs are defined by an explicit per-sprint start/end date list, so sprint lengths can vary freely. Also use it if the user references a WBS file shaped like "WBS" (機能名 groups, each broken into コーディング/実装/試験/リリース-style steps with per-step assignees and business-day durations) and wants a new or refreshed version of it — step names, order, and count are all free-form per feature, and steps within a feature may have gaps between them or overlap. Don't use this for generic/ad-hoc spreadsheets that aren't schedule/timeline-shaped — plain data tables should just be written directly with openpyxl or pandas.
 ---
 
-# WBS / Gantt Chart Excel Generator
+# WBS / ガントチャート Excel ジェネレーター
 
-Builds a two-sheet Excel workbook: a "ガントチャート" sheet (task table + a business-day calendar
-with colored Gantt bars) and a "設定" sheet (the holiday list that drives all the date math). The
-whole thing is produced by `scripts/generate_wbs.py`, which needs `openpyxl` and `PyYAML` (`pip
-install pyyaml` if the environment doesn't already have it).
+2枚のシートからなる Excel ワークブックを作成します。「ガントチャート」シート（タスク表 + 色付きガントバー付きの営業日カレンダー）と「設定」シート（日付計算の基になる祝日リスト）です。すべて `scripts/generate_wbs.py` によって生成され、`openpyxl` と `PyYAML` が必要です（環境に入っていなければ `pip install pyyaml`）。
 
-## Why this shape
+## この構成にしている理由
 
-Each feature ("機能") is broken into an ordered list of steps — typically something like
-コーディング → 実装 → 試験 → リリース, but step names, order, and count are entirely free-form per
-feature (add a custom step like テストデータ作成, skip steps a feature doesn't need, reorder them,
-whatever fits). What's fixed per step is its shape: a name, an assignee, a start date, and a
-duration in business days.
+各機能（「機能」）は、順序付きの工程リストに分解されます。典型的には コーディング → 実装 → 試験 → リリース のような流れですが、工程名・順序・数は機能ごとに完全に自由です（テストデータ作成のようなカスタム工程を追加したり、その機能に不要な工程を省いたり、順序を入れ替えたり、何でも構いません）。工程ごとに固定されているのは、その形だけです。すなわち、名前・担当・開始日・所要日数（営業日）です。
 
-Every step carries its **own explicit start date** — there is no chaining that forces one step to
-begin the business day after the previous one ends. That's deliberate: it lets steps within a
-feature have a gap between them (e.g. a buffer week before 受け入れ試験) or overlap freely (e.g. a
-テストデータ作成 step that runs in parallel with 実装), simply by choosing that step's start date.
-End dates are still never typed by hand — each step's end is computed from its own start + duration
-by walking business days (skipping weekends and the holidays in the 設定 sheet).
+各工程は**それぞれ独自の明示的な開始日**を持ちます。前の工程が終わった翌営業日に自動的に始まる、というような連鎖はありません。これは意図的な仕様です。これにより、機能内の工程間に間隔を空けたり（例：受け入れ試験の前にバッファ週を挟む）、自由に重複させたり（例：実装と並行して走るテストデータ作成工程）が、その工程の開始日を選ぶだけで実現できます。終了日は手入力されることはなく、常に各工程の「開始日 + 所要日数」から、営業日を数える（土日と設定シートの祝日を除く）ことで計算されます。
 
-## Step-by-step workflow
+## 作業手順
 
-1. **Get the tasks YAML.** Ask the user for a YAML file describing their features, or help them
-   create one.
-   - The required shape is `assets/tasks_template.yaml` — copy it to a working location and either
-     have the user fill it in, or fill it in yourself from whatever the user describes in chat
-     (feature names, step names, assignees, start dates, durations in business days). Shape:
+1. **タスク YAML を用意する。** ユーザーに、機能を記述した YAML ファイルを求めるか、一緒に作成します。
+   - 必要な形式は `assets/tasks_template.yaml` です。これを作業用の場所にコピーし、ユーザーに記入してもらうか、チャットで説明された内容（機能名、工程名、担当、開始日、所要日数（営業日））をもとに自分で埋めます。形式：
      ```yaml
      features:
        - name: <機能名>
          steps:
-           - name: <工程名>       # free-form, e.g. コーディング / 実装 / テストデータ作成 / ...
-             assignee: <担当>     # may be "" if not yet assigned
-             start: YYYY-MM-DD    # this step's own start date
-             duration: <int>      # business days, must be a positive integer
+           - name: <工程名>       # 自由形式。例: コーディング / 実装 / テストデータ作成 / ...
+             assignee: <担当>     # 未アサインの場合は "" でも可
+             start: YYYY-MM-DD    # この工程自体の開始日
+             duration: <int>      # 営業日数。正の整数であること
            - name: <次の工程>
              ...
        - name: <次の機能>
          steps: [...]
      ```
-   - `features` is a list of one or more features; each feature's `steps` is a list of one or more
-     steps, in whatever order/names/count fits that feature — nothing is templated or fixed across
-     features, so one feature can have a custom step another doesn't.
-   - Every step's `start` is a real calendar date (YAML parses unquoted `YYYY-MM-DD` as a date
-     automatically) — the script rolls it forward to the next business day if it lands on a
-     weekend/holiday and reports the adjustment, then computes that step's end from `start` +
-     `duration` by walking business days.
-   - **Steps are scheduled independently — there is no auto-chaining.** If the user wants a
-     traditional back-to-back schedule (each step starting the business day after the previous
-     one ends), compute those start dates yourself when filling in the YAML — don't leave gaps
-     unless the user actually wants a buffer, and don't assume the script will close them for you.
-     Conversely, if the user wants a gap (buffer time) or an overlap (parallel work) between two
-     steps in the same feature, just set that step's `start` accordingly — both are fully
-     supported, no special flag needed.
+   - `features` は1つ以上の機能のリストで、各機能の `steps` は1つ以上の工程のリストです。順序・名前・数はその機能に合わせて自由に決められ、機能間でテンプレート化・固定はされません。つまり、ある機能だけにしかないカスタム工程があっても構いません。
+   - すべての工程の `start` は実際のカレンダー日付です（YAML はクォートなしの `YYYY-MM-DD` を日付として自動的にパースします）。土日・祝日に当たる場合、スクリプトが次の営業日へ繰り上げ、その調整内容を報告した上で、`start` + `duration` からその工程の終了日を営業日ベースで計算します。
+   - **各工程は独立してスケジュールされ、自動連鎖はありません。** ユーザーが従来型の連続スケジュール（各工程が前の工程の終了翌営業日に開始する形）を望む場合は、YAML を記入する際に開始日を自分で計算してください。ユーザーが実際にバッファを望んでいない限り間隔を空けたままにせず、スクリプトが自動で詰めてくれると仮定しないでください。逆に、同じ機能内の2工程間に間隔（バッファ時間）や重複（並行作業）を持たせたい場合は、その工程の `start` を適切に設定するだけで構いません。どちらも特別なフラグなしで完全にサポートされています。
 
-2. **Get the holiday list.** Default to `assets/holidays_2026.csv` (real 2026 Japanese national
-   holidays, same `date,name` shape as the reference file's 設定 sheet). If the schedule spans a
-   different year or the user has their own company holiday list, ask for/build a CSV in the same
-   `date,name` format (dates as `YYYY-MM-DD`) instead. This file becomes the workbook's 設定 sheet
-   verbatim, so the user can hand-edit holidays later directly in Excel too.
+2. **祝日リストを用意する。** デフォルトは `assets/holidays_2026.csv`（2026年の実際の日本の祝日一覧。参照ファイルの設定シートと同じ `date,name` 形式）です。スケジュールが別の年にまたがる場合や、ユーザー独自の会社の休日リストがある場合は、同じ `date,name` 形式（日付は `YYYY-MM-DD`）の CSV を求めるか作成してください。このファイルはそのままワークブックの設定シートになるため、ユーザーは後で Excel 上で直接祝日を手編集することもできます。
 
-3. **Confirm the SP (sprint) settings.** SPs are defined by one row per sprint in
-   `assets/sp_list_template.csv`, each with its own explicit start and end date, so lengths can
-   differ freely between sprints (e.g. a longer QA sprint, a short one around a holiday week):
+3. **SP（スプリント）設定を確認する。** SP は `assets/sp_list_template.csv` に1スプリント1行の形で定義され、それぞれ独自の明示的な開始日・終了日を持つため、スプリントごとに長さを自由に変えられます（例：長めの QA スプリント、祝日週前後の短いスプリントなど）：
    ```
    SP,開始日,終了日
    26,2026-01-19,2026-01-30
@@ -76,60 +44,28 @@ by walking business days (skipping weekends and the holidays in the 設定 sheet
    28,2026-02-16,2026-03-06
    29,2026-03-09,2026-03-20
    ```
-   - This file is the default — if the user doesn't hand you a different SP list, the script reads
-     `assets/sp_list_template.csv` as-is. Have the user fill it in (or fill it in yourself from
-     what they describe), then either edit that template in place or pass a different file via
-     `--sp-list` if they want to keep multiple schedules around.
-   - Rows don't need to be pre-sorted — the script sorts by 開始日. Overlapping ranges are a hard
-     error (fix the dates and rerun); a business-day gap between one SP's end and the next SP's
-     start is only a warning (that stretch of days renders with a blank SP band — often fine if
-     it's intentional buffer time).
-   - `chart_start_date` / `chart_end_date` (see step 4) work on top of the SP list, e.g. to extend
-     the calendar earlier/later than the SP list itself covers, and default to the SP list's own
-     earliest start / latest end when omitted.
+   - このファイルがデフォルトです。ユーザーが別の SP リストを渡さない限り、スクリプトは `assets/sp_list_template.csv` をそのまま読み込みます。ユーザーに記入してもらうか、説明された内容から自分で記入し、そのままテンプレートを編集するか、複数のスケジュールを保持したい場合は `--sp-list` で別ファイルを指定してください。
+   - 行は事前にソートされている必要はありません。スクリプトが開始日でソートします。範囲が重複している場合はエラーになります（日付を修正して再実行してください）。あるSPの終了日と次のSPの開始日の間の営業日ギャップは警告のみです（その期間は SP 帯が空欄で描画されます。意図的なバッファ期間であれば問題ないことが多いです）。
+   - `chart_start_date` / `chart_end_date`（手順4参照）は SP リストの上に重ねて機能し、例えば SP リストがカバーする範囲よりもカレンダーを前後に拡張する際に使います。省略した場合は SP リスト自体の最も早い開始日／最も遅い終了日がデフォルトになります。
 
-   If a task's computed end date falls beyond whatever the calendar ends up covering (e.g. a
-   `chart_end_date` set too early, or an SP list that doesn't reach far enough), the script still
-   generates the file but prints a warning per overflowing task — that bar just won't be visible
-   until the range is widened and regenerated.
+   タスクの計算上の終了日が、カレンダーがカバーする範囲を超える場合（例：`chart_end_date` が早すぎる、または SP リストの範囲が足りない場合）、スクリプトはファイルは生成しますが、はみ出したタスクごとに警告を出します。その場合、範囲を広げて再生成するまで、そのバーは表示されません。
 
-4. **Run the generator:**
+4. **ジェネレーターを実行する：**
    ```bash
    python3 scripts/generate_wbs.py \
      --tasks <path-to-tasks.yaml> \
      --holidays <path-to-holidays.csv> \
      --output <output.xlsx>
    ```
-   `--sp-list <path-to-sp_list.csv>` is optional — omit it to use `assets/sp_list_template.csv` by
-   default. `--chart-start-date` / `--chart-end-date` are also accepted for one-off tweaks to trim
-   or extend the rendered calendar beyond what the SP list covers.
+   `--sp-list <path-to-sp_list.csv>` は省略可能です。省略するとデフォルトで `assets/sp_list_template.csv` が使われます。`--chart-start-date` / `--chart-end-date` も、SP リストがカバーする範囲を超えて描画カレンダーを一時的に調整（トリムまたは拡張）したい場合に指定できます。
 
-   The script prints a summary (feature/task counts, date range, SP range, any start-date
-   rollovers, and any overflow/SP-gap warnings) and exits with a non-zero code plus a Japanese error
-   message if the input has a problem (missing/invalid YAML key, bad date, missing/non-positive
-   duration, overlapping SPs, PyYAML not installed, etc.) — read that message back to the user and
-   fix the input rather than guessing.
+   スクリプトはサマリー（機能数／タスク数、日付範囲、SP範囲、開始日の繰り上げ調整、はみ出し／SPギャップの警告など）を出力し、入力に問題がある場合（YAML キーの欠落・不正、不正な日付、所要日数の欠落・非正数、SP の重複、PyYAML 未インストールなど）は日本語のエラーメッセージとともに0以外の終了コードで終了します。そのメッセージをユーザーに伝え、推測で直さずに入力を修正してください。
 
-5. **Report the output path to the user** and mention the summary line (date range, SP range,
-   number of features/tasks, any adjustments). If they want to tweak durations, assignees, or
-   step start dates (including adding gaps/overlaps), edit the tasks YAML and rerun; if they want
-   to tweak sprint boundaries, edit the SP list and rerun — don't hand-edit the generated xlsx's
-   date logic directly, since the whole point is that it's regenerable.
+5. **出力パスをユーザーに報告し**、サマリー行（日付範囲、SP範囲、機能数／タスク数、調整内容）を伝えます。所要日数・担当・工程の開始日（間隔や重複の追加を含む）を調整したい場合はタスク YAML を編集して再実行し、スプリントの境界を調整したい場合は SP リストを編集して再実行してください。生成された xlsx の日付ロジックを直接手編集しないでください。これは再生成可能であることこそがこの仕組みの目的だからです。
 
-## Notes on what the workbook contains
+## ワークブックの内容について
 
-- Column D (SP) and the day-by-day grid's month/SP/week bands are derived purely from the
-  computed dates — you never need to fill these in by hand.
-- The Gantt bars are live Excel conditional formatting (`=AND(I$4>=$E<row>,I$4<=$F<row>)`), so if
-  someone opens the file and drags a task's 開始/終了 dates around by hand, the bar moves with it.
-  The fill used by that rule sets both `fgColor` and `bgColor` to the same color — a dxf (the style
-  block a conditional-formatting rule points to) is rendered differently from a normal cell style,
-  and some Excel builds (notably Excel for Mac) paint a dxf's "solid" pattern from `bgColor` rather
-  than `fgColor`; setting only `fgColor` renders fine in openpyxl/most Windows Excel but shows up
-  blank/white on those builds, so both are always set together for this fill.
-  The day-header row (row 4) is also a live `WORKDAY()` formula chain against the 設定 sheet, so
-  editing/adding holidays there reflows the visible calendar dates — but the merged month/SP/week
-  *band boundaries* are fixed at generation time (same limitation as hand-built Excel Gantt charts:
-  regenerate via the script if holidays change enough to shift band widths).
-- 期間 (column G) is a live `NETWORKDAYS()` formula; タスク完了率 (column H) is left at 0% for the
-  user to fill in manually — it's not derived from the input YAML.
+- D列（SP）と日別グリッドの月／SP／週の帯は、すべて計算済みの日付から導出されます。手動で埋める必要はありません。
+- ガントバーはライブの Excel 条件付き書式（`=AND(I$4>=$E<row>,I$4<=$F<row>)`）です。そのため、誰かがファイルを開いてタスクの開始／終了日をドラッグして手動で変更すると、バーも連動して動きます。この規則が使う塗りつぶしは `fgColor` と `bgColor` の両方に同じ色を設定しています。dxf（条件付き書式のルールが参照するスタイルブロック）は通常のセルスタイルとは異なる描画がされ、一部の Excel ビルド（特に Mac 版 Excel）では dxf の「ソリッド」パターンを `fgColor` ではなく `bgColor` から描画します。`fgColor` だけを設定すると openpyxl やほとんどの Windows 版 Excel では正しく表示されますが、これらのビルドでは空白／白のまま表示されてしまうため、この塗りつぶしについては常に両方を設定しています。
+  日付ヘッダー行（4行目）もライブの `WORKDAY()` 数式チェーンとして設定シートを参照しているため、そこで祝日を編集・追加すると表示上のカレンダー日付が再計算されます。ただし、結合された月／SP／週の**帯の境界**は生成時点で固定されます（手作業で作った Excel ガントチャートと同じ制約です。帯の幅が変わるほど祝日が変化した場合は、スクリプトで再生成してください）。
+- 期間（G列）はライブの `NETWORKDAYS()` 数式です。タスク完了率（H列）は 0% のままユーザーが手動で入力する想定であり、入力 YAML から自動導出されるものではありません。
