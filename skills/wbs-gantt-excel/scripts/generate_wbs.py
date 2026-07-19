@@ -1,34 +1,28 @@
 #!/usr/bin/env python3
-"""Generate a Japanese WBS / Gantt-chart Excel workbook from a tasks CSV and a holiday CSV.
+"""Generate a Japanese WBS / Gantt-chart Excel workbook from a tasks YAML file and a holiday CSV.
 
-Usage (uniform SP length):
-    python generate_wbs.py --tasks tasks.csv --holidays holidays.csv --output out.xlsx \
-        [--sp-config sp_config.csv] \
-        [--chart-start-date 2026-01-19] [--chart-end-date 2026-03-31] \
-        [--sp-start-number 26] [--sp-length-workdays 10] [--num-sps N]
-
-Usage (variable-length SPs, each with its own start/end date):
-    python generate_wbs.py --tasks tasks.csv --holidays holidays.csv --output out.xlsx \
-        --sp-list sp_list.csv [--chart-start-date ...] [--chart-end-date ...]
-
-SP settings (chart_start_date, chart_end_date, sp_start_number, sp_length_workdays, num_sps) can
-be supplied via a --sp-config CSV (key,value rows) instead of CLI flags -- see
-assets/sp_config_template.csv. Any CLI flag that is explicitly passed overrides the same setting
-from --sp-config. chart_end_date and num_sps are two different ways to say "how much calendar to
-render" and are mutually exclusive; leave both unset to auto-size the calendar to the tasks.
+Usage:
+    python generate_wbs.py --tasks tasks.yaml --holidays holidays.csv --output out.xlsx \
+        [--sp-list sp_list.csv] [--chart-start-date 2026-01-19] [--chart-end-date 2026-03-31]
 
 --sp-list points to a CSV of SP,開始日,終了日 rows (see assets/sp_list_template.csv) that gives
-each SP an explicit, independently-sized date range instead of a uniform sp_length_workdays. It is
-mutually exclusive with --sp-start-number/--sp-length-workdays/--num-sps (and the matching
-sp_config keys); --chart-start-date/--chart-end-date still work on top of it to trim/extend the
-rendered calendar.
+each SP its own explicit, independently-sized date range, so SP lengths can vary freely from
+sprint to sprint. If omitted, it defaults to assets/sp_list_template.csv next to this script.
+--chart-start-date/--chart-end-date still work on top of it to trim/extend the rendered calendar
+beyond what the SP list itself covers; both default to the SP list's own earliest start / latest
+end when omitted.
 
-Only depends on openpyxl (no pandas). See the skill's SKILL.md for the CSV formats.
+--tasks points to a YAML file (see assets/tasks_template.yaml): a `features:` list, each with a
+free-form, ordered `steps:` list (name/assignee/start/duration). Every step carries its own
+explicit start date, so steps within a feature may have gaps between them or overlap freely --
+there is no forced chaining from one step's end to the next step's start.
+
+Depends on openpyxl and PyYAML (`pip install pyyaml` if not already available). See the skill's
+SKILL.md for the file formats.
 """
 import argparse
 import csv
 import datetime as dt
-import math
 import os
 import sys
 
@@ -37,10 +31,11 @@ from openpyxl.formatting.rule import ColorScaleRule, FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-STEPS = ["コーディング", "実装", "実装後コーダー確認", "試験", "受け入れ試験", "リリース"]
-
 FIRST_DAY_COL = 9  # column I
 HOLIDAY_SHEET_LAST_ROW = 500  # generous fixed range for WORKDAY/NETWORKDAYS formulas
+DEFAULT_SP_LIST_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "assets", "sp_list_template.csv"
+)
 
 HEADER_FILL = PatternFill("solid", fgColor="FF0B5394")
 SP_FILL = PatternFill("solid", fgColor="FF990000")
@@ -154,63 +149,85 @@ def load_holidays(path):
     return holidays
 
 
+def load_yaml_module():
+    try:
+        import yaml
+    except ImportError:
+        raise InputError(
+            "タスクYAMLの読み込みには PyYAML が必要です。`pip install pyyaml` を実行してから再実行してください。"
+        )
+    return yaml
+
+
+def _require_mapping(obj, context):
+    if not isinstance(obj, dict):
+        raise InputError(f"{context} はマッピング(key: value)にしてください")
+    return obj
+
+
+def _coerce_date(value, context):
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    return parse_date(str(value), context=context)
+
+
 def load_tasks(path):
-    fieldnames, rows = read_csv_rows(path)
-    required = ["機能名", "開始日"] + [f"{s}_担当" for s in STEPS] + [f"{s}_日数" for s in STEPS]
-    missing = [c for c in required if c not in (fieldnames or [])]
-    if missing:
-        raise InputError(f"タスクCSVに必要な列がありません: {missing}\n必要な列: {required}")
+    yaml = load_yaml_module()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise InputError(f"タスクYAMLの構文エラーです: {path}\n{e}")
+
+    if not isinstance(data, dict) or "features" not in data:
+        raise InputError(f"タスクYAMLのトップレベルは 'features:' キーを持つマッピングにしてください: {path}")
+    raw_features = data["features"]
+    if not isinstance(raw_features, list) or not raw_features:
+        raise InputError(f"タスクYAMLの 'features' は1件以上のリストにしてください: {path}")
 
     features = []
-    for i, row in enumerate(rows, start=2):
-        name = (row.get("機能名") or "").strip()
+    for fi, raw_feat in enumerate(raw_features, start=1):
+        _require_mapping(raw_feat, f"features[{fi}]")
+        name = str(raw_feat.get("name") or "").strip()
         if not name:
-            continue
-        raw_start = parse_date(row.get("開始日"), context=f"行{i} ({name}) の開始日")
+            raise InputError(f"features[{fi}]: name が未指定です")
+
+        raw_steps = raw_feat.get("steps")
+        if not isinstance(raw_steps, list) or not raw_steps:
+            raise InputError(f"「{name}」: steps は1件以上のリストにしてください")
+
         steps = []
-        for step in STEPS:
-            assignee = (row.get(f"{step}_担当") or "").strip()
-            if not assignee:
-                continue
-            dur_raw = (row.get(f"{step}_日数") or "").strip()
-            if not dur_raw:
-                raise InputError(f"行{i} ({name}): {step}_日数 が未入力です(担当が入っているのに日数が空)")
+        for si, raw_step in enumerate(raw_steps, start=1):
+            _require_mapping(raw_step, f"「{name}」の steps[{si}]")
+            step_name = str(raw_step.get("name") or "").strip()
+            if not step_name:
+                raise InputError(f"「{name}」の steps[{si}]: name が未指定です")
+
+            assignee = str(raw_step.get("assignee") or "").strip()
+
+            start_raw = raw_step.get("start")
+            if start_raw is None or str(start_raw).strip() == "":
+                raise InputError(f"「{name}」の「{step_name}」: start が未指定です")
+            raw_start = _coerce_date(start_raw, context=f"「{name}」の「{step_name}」の start")
+
+            dur_raw = raw_step.get("duration")
+            if dur_raw is None or str(dur_raw).strip() == "":
+                raise InputError(f"「{name}」の「{step_name}」: duration が未指定です")
             try:
                 dur = int(dur_raw)
-            except ValueError:
-                raise InputError(f"行{i} ({name}): {step}_日数 は整数で指定してください: {dur_raw!r}")
+            except (TypeError, ValueError):
+                raise InputError(f"「{name}」の「{step_name}」: duration は整数にしてください: {dur_raw!r}")
             if dur <= 0:
-                raise InputError(f"行{i} ({name}): {step}_日数 は正の整数にしてください: {dur}")
-            steps.append({"name": step, "assignee": assignee, "duration": dur})
-        if not steps:
-            raise InputError(f"行{i} ({name}): 少なくとも1つのステップに担当者を指定してください")
-        features.append({"name": name, "raw_start": raw_start, "steps": steps})
+                raise InputError(f"「{name}」の「{step_name}」: duration は正の整数にしてください: {dur}")
+
+            steps.append({"name": step_name, "assignee": assignee, "raw_start": raw_start, "duration": dur})
+        features.append({"name": name, "steps": steps})
 
     if not features:
-        raise InputError(f"タスクCSVに有効な行がありません: {path}")
+        raise InputError(f"タスクYAMLに有効なfeatureがありません: {path}")
     return features
-
-
-SP_CONFIG_KEYS = {"chart_start_date", "chart_end_date", "sp_start_number", "sp_length_workdays", "num_sps"}
-
-
-def load_sp_config(path):
-    """Load SP settings from a key,value CSV. Returns (config dict of raw strings, unknown keys)."""
-    fieldnames, rows = read_csv_rows(path)
-    if not fieldnames or "key" not in fieldnames or "value" not in fieldnames:
-        raise InputError(f"SP設定CSVは 'key,value' の形式にしてください: {path}")
-    config = {}
-    unknown = []
-    for row in rows:
-        key = (row.get("key") or "").strip()
-        value = (row.get("value") or "").strip()
-        if not key or not value:
-            continue
-        if key not in SP_CONFIG_KEYS:
-            unknown.append(key)
-            continue
-        config[key] = value
-    return config, unknown
 
 
 def parse_int_setting(value, field_name):
@@ -278,50 +295,25 @@ def sp_label_for_date(d, entries):
 
 
 def schedule_features(features, holidays, adjustments):
+    """Each step carries its own explicit start date, rolled forward to the next business day if
+    needed. Steps are scheduled independently of one another -- unlike the old fixed-step chain,
+    nothing forces a step to start right after the previous one ends, so gaps and overlaps between
+    steps within a feature are both allowed."""
     for feat in features:
-        start = roll_to_workday(feat["raw_start"], holidays)
-        if start != feat["raw_start"]:
-            adjustments.append(f"「{feat['name']}」: 開始日 {feat['raw_start']} は非稼働日のため {start} に調整しました")
-        feat["start"] = start
-        cur_start = start
         for step in feat["steps"]:
-            step["start"] = cur_start
-            step["end"] = add_workdays(cur_start, step["duration"] - 1, holidays)
-            cur_start = next_workday(step["end"], holidays)
+            start = roll_to_workday(step["raw_start"], holidays)
+            if start != step["raw_start"]:
+                adjustments.append(
+                    f"「{feat['name']}」の「{step['name']}」: 開始日 {step['raw_start']} は非稼働日のため {start} に調整しました"
+                )
+            step["start"] = start
+            step["end"] = add_workdays(start, step["duration"] - 1, holidays)
     return features
 
 
 # ---------------------------------------------------------------------------
 # Calendar / SP grid
 # ---------------------------------------------------------------------------
-
-def build_calendar(chart_start, holidays, sp_length, num_sps_override, chart_end, features):
-    if num_sps_override and chart_end:
-        raise InputError("終了日(chart_end_date)とSP数(num_sps)は同時に指定できません。どちらか一方にしてください。")
-
-    if num_sps_override:
-        num_sps = num_sps_override
-    elif chart_end:
-        if chart_end < chart_start:
-            raise InputError(f"終了日(chart_end_date={chart_end})が開始日(chart_start_date={chart_start})より前です。")
-        needed = workday_index(chart_start, chart_end, holidays) + 1
-        num_sps = math.ceil(needed / sp_length)
-    else:
-        all_ends = [s["end"] for f in features for s in f["steps"]]
-        max_end = max(all_ends) if all_ends else chart_start
-        needed = workday_index(chart_start, max_end, holidays) + 1
-        if needed < 1:
-            needed = 1
-        num_sps = math.ceil(needed / sp_length) + 1  # +1 SP of buffer, auto-sizing mode only
-
-    total_workdays = num_sps * sp_length
-    calendar = [chart_start]
-    d = chart_start
-    for _ in range(total_workdays - 1):
-        d = next_workday(d, holidays)
-        calendar.append(d)
-    return calendar, num_sps
-
 
 def build_calendar_explicit(chart_start, chart_end, holidays):
     """Business-day calendar spanning chart_start..chart_end inclusive (for --sp-list mode).
@@ -399,8 +391,7 @@ def merge_sp_band(ws, row, sp_labels, fill, font):
 # Workbook assembly
 # ---------------------------------------------------------------------------
 
-def build_workbook(features, holidays, chart_start, sp_start_number, sp_length, num_sps_override,
-                    chart_end=None, sp_entries=None):
+def build_workbook(features, holidays, chart_start, sp_entries, chart_end=None):
     adjustments = []
     schedule_features(features, holidays, adjustments)
 
@@ -413,27 +404,19 @@ def build_workbook(features, holidays, chart_start, sp_start_number, sp_length, 
                 )
 
     sp_warnings = []
-    if sp_entries is not None:
-        if chart_end is None:
-            chart_end = max(e["end"] for e in sp_entries)
-        calendar = build_calendar_explicit(chart_start, chart_end, holidays)
-        num_sps = len(sp_entries)
-        sp_labels = [sp_label_for_date(d, sp_entries) for d in calendar]
-        sp_warnings.extend(sp_list_gap_warnings(sp_entries, holidays))
-        if any(lbl is None for lbl in sp_labels):
-            sp_warnings.append("表示範囲内にどのSPにも属さない営業日があります(SP列は空欄になります)")
-        sp_numbers = sorted(e["sp"] for e in sp_entries)
-        sp_range_label = f"SP{sp_numbers[0]}-SP{sp_numbers[-1]}"
+    if chart_end is None:
+        chart_end = max(e["end"] for e in sp_entries)
+    calendar = build_calendar_explicit(chart_start, chart_end, holidays)
+    num_sps = len(sp_entries)
+    sp_labels = [sp_label_for_date(d, sp_entries) for d in calendar]
+    sp_warnings.extend(sp_list_gap_warnings(sp_entries, holidays))
+    if any(lbl is None for lbl in sp_labels):
+        sp_warnings.append("表示範囲内にどのSPにも属さない営業日があります(SP列は空欄になります)")
+    sp_numbers = sorted(e["sp"] for e in sp_entries)
+    sp_range_label = f"SP{sp_numbers[0]}-SP{sp_numbers[-1]}"
 
-        def sp_number_for(d):
-            return sp_label_for_date(d, sp_entries)
-    else:
-        calendar, num_sps = build_calendar(chart_start, holidays, sp_length, num_sps_override, chart_end, features)
-        sp_labels = [sp_start_number + i // sp_length for i in range(len(calendar))]
-        sp_range_label = f"SP{sp_start_number}-SP{sp_start_number + num_sps - 1}"
-
-        def sp_number_for(d):
-            return sp_start_number + workday_index(chart_start, d, holidays) // sp_length
+    def sp_number_for(d):
+        return sp_label_for_date(d, sp_entries)
 
     overflow = []
     for feat in features:
@@ -590,100 +573,42 @@ def build_workbook(features, holidays, chart_start, sp_start_number, sp_length, 
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Generate a Japanese WBS/Gantt xlsx from a tasks CSV and holiday CSV.")
-    p.add_argument("--tasks", required=True, help="Wide-format tasks CSV path")
+    p.add_argument("--tasks", required=True,
+                    help="Tasks YAML path (features/steps, see assets/tasks_template.yaml)")
     p.add_argument("--holidays", required=True, help="Holiday CSV path (columns: date,name)")
     p.add_argument("--output", required=True, help="Output .xlsx path")
-    p.add_argument("--sp-config", default=None,
-                    help="SP settings CSV (key,value rows: chart_start_date/chart_end_date/"
-                         "sp_start_number/sp_length_workdays/num_sps). CLI flags below override "
-                         "matching keys from this file.")
-    p.add_argument("--sp-start-number", type=int, default=None,
-                    help="SP number of the first sprint (default: 26, or --sp-config)")
-    p.add_argument("--sp-length-workdays", type=int, default=None,
-                    help="Business days per SP (default: 10, or --sp-config)")
     p.add_argument("--sp-list", default=None,
                     help="CSV of SP,開始日,終了日 rows giving each SP its own explicit date range "
-                         "so SPs can vary in length. Mutually exclusive with --sp-start-number/"
-                         "--sp-length-workdays/--num-sps (and the matching --sp-config keys).")
+                         "(see assets/sp_list_template.csv). Defaults to that template file next "
+                         "to this script if omitted.")
     p.add_argument("--chart-start-date", default=None,
-                    help="First day shown on the chart, YYYY-MM-DD (default: --sp-config, or the "
-                         "earliest 開始日 in the tasks CSV)")
+                    help="First day shown on the chart, YYYY-MM-DD (default: the SP list's own "
+                         "earliest 開始日)")
     p.add_argument("--chart-end-date", default=None,
-                    help="Last day the calendar must cover, YYYY-MM-DD. Mutually exclusive with "
-                         "--num-sps (default: --sp-config, or unset)")
-    p.add_argument("--num-sps", type=int, default=None,
-                    help="Number of SPs to render. Mutually exclusive with --chart-end-date "
-                         "(default: --sp-config, or auto-computed to cover all tasks + 1 buffer SP)")
+                    help="Last day the calendar must cover, YYYY-MM-DD (default: the SP list's own "
+                         "latest 終了日)")
     return p.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
     try:
-        config, unknown_keys = ({}, [])
-        if args.sp_config:
-            config, unknown_keys = load_sp_config(args.sp_config)
+        sp_list_path = args.sp_list or DEFAULT_SP_LIST_PATH
+        sp_entries = load_sp_list(sp_list_path)
 
-        sp_entries = None
-        if args.sp_list:
-            conflicting = []
-            if args.sp_start_number is not None:
-                conflicting.append("--sp-start-number")
-            if args.sp_length_workdays is not None:
-                conflicting.append("--sp-length-workdays")
-            if args.num_sps is not None:
-                conflicting.append("--num-sps")
-            for key in ("sp_start_number", "sp_length_workdays", "num_sps"):
-                if key in config:
-                    conflicting.append(f"sp_config:{key}")
-            if conflicting:
-                raise InputError(
-                    "--sp-list はSPごとに開始日/終了日を指定するモードのため、均一SP長の設定と"
-                    f"同時には指定できません: {', '.join(conflicting)}"
-                )
-            sp_entries = load_sp_list(args.sp_list)
-
-        sp_start_number = (
-            args.sp_start_number if args.sp_start_number is not None
-            else parse_int_setting(config["sp_start_number"], "sp_start_number") if "sp_start_number" in config
-            else 26
-        )
-        sp_length_workdays = (
-            args.sp_length_workdays if args.sp_length_workdays is not None
-            else parse_int_setting(config["sp_length_workdays"], "sp_length_workdays") if "sp_length_workdays" in config
-            else 10
-        )
-        if sp_length_workdays <= 0:
-            raise InputError("sp_length_workdays は正の整数にしてください")
-
-        num_sps_override = (
-            args.num_sps if args.num_sps is not None
-            else parse_int_setting(config["num_sps"], "num_sps") if "num_sps" in config
-            else None
-        )
-
-        chart_start_raw = args.chart_start_date or config.get("chart_start_date")
-        chart_end_raw = args.chart_end_date or config.get("chart_end_date")
-        chart_end = parse_date(chart_end_raw, context="終了日(chart_end_date)") if chart_end_raw else None
+        chart_end = parse_date(args.chart_end_date, context="終了日(chart_end_date)") if args.chart_end_date else None
 
         holidays = load_holidays(args.holidays)
         features = load_tasks(args.tasks)
 
         chart_start_auto = False
-        if chart_start_raw:
-            chart_start = parse_date(chart_start_raw, context="開始日(chart_start_date)")
-        elif sp_entries is not None:
+        if args.chart_start_date:
+            chart_start = parse_date(args.chart_start_date, context="開始日(chart_start_date)")
+        else:
             chart_start = min(e["start"] for e in sp_entries)
             chart_start_auto = True
-        else:
-            chart_start = min(f["raw_start"] for f in features)
-            chart_start_auto = True
 
-        wb, summary = build_workbook(
-            features, holidays, chart_start,
-            sp_start_number, sp_length_workdays, num_sps_override, chart_end,
-            sp_entries=sp_entries,
-        )
+        wb, summary = build_workbook(features, holidays, chart_start, sp_entries, chart_end)
 
         out_dir = os.path.dirname(os.path.abspath(args.output))
         if out_dir:
@@ -696,17 +621,14 @@ def main(argv=None):
     print(f"作成しました: {args.output}")
     print(f"機能数: {summary['features']} / タスク数: {summary['tasks']}")
     if chart_start_auto:
-        source = "SP一覧の最早開始日" if sp_entries is not None else "タスクの最早開始日"
-        print(f"(開始日が未指定のため、{source} {summary['chart_start']} を使用しました)")
+        print(f"(開始日が未指定のため、SP一覧の最早開始日 {summary['chart_start']} を使用しました)")
     print(f"期間: {summary['chart_start']} 〜 {summary['chart_end']} ({summary['sp_range']}, 全{summary['num_sps']}SP)")
-    if unknown_keys:
-        print(f"注意: --sp-config の不明なキーを無視しました: {unknown_keys}")
     if summary["adjustments"]:
         print("開始日の調整:")
         for a in summary["adjustments"]:
             print(f"  - {a}")
     if summary["overflow"]:
-        print("表示範囲を超えるタスク(chart_end_date/num_spsを広げてください):")
+        print("表示範囲を超えるタスク(SP一覧やchart_end_dateを広げてください):")
         for o in summary["overflow"]:
             print(f"  - {o}")
     if summary["sp_warnings"]:

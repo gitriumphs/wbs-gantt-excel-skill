@@ -1,0 +1,70 @@
+# タスク定義ファイル (YAML)
+#
+# features: 1件以上の機能のリスト。各機能は steps: に工程を並べる。
+#   - 工程名(name)は自由記述。「コーディング」「実装」「試験」のような決まった名前に限らず、
+#     「テストデータ作成」のような独自の工程を好きなだけ追加してよい。
+#   - 各工程は start(開始日) と duration(所要営業日数) を必ず自分で指定する。前の工程の終了日
+#     から自動的に次の工程が始まる、という連鎖計算はしない。そのため:
+#       - 工程と工程の間に日数を空けたい(バッファ期間を置きたい)  → start を後ろにずらす
+#       - 工程を重複させたい(並行作業させたい)                   → start を前の工程の期間内にする
+#     のどちらも自由にできる。
+#   - start が土日・祝日(設定CSV参照)に当たる場合は次の営業日に自動調整され、その旨がサマリに
+#     表示される。
+#   - assignee は空文字("")でも構わない(担当未定の工程として表示される)。
+#
+# 以下は「トップ画面にリワード広告を追加」で、実装と並行して独自の「テストデータ作成」工程を
+# 走らせつつ、実装後コーダー確認の前に数日のバッファを空けている例。
+features:
+  - name: トップ画面にリワード広告を追加
+    steps:
+      - name: コーディング
+        assignee: 佐藤
+        start: 2026-07-17
+        duration: 3
+      - name: 実装
+        assignee: 鈴木
+        start: 2026-07-22
+        duration: 5
+      - name: テストデータ作成
+        assignee: 加藤
+        start: 2026-07-24
+        duration: 2
+      - name: 実装後コーダー確認
+        assignee: 佐藤
+        start: 2026-08-03
+        duration: 2
+      - name: 試験
+        assignee: 加藤
+        start: 2026-08-05
+        duration: 3
+      - name: 受け入れ試験
+        assignee: 田中
+        start: 2026-08-10
+        duration: 5
+      - name: リリース
+        assignee: 田中
+        start: 2026-08-18
+        duration: 1
+
+  - name: 獲得上限ポイント数表示対応
+    steps:
+      - name: コーディング
+        assignee: 佐藤
+        start: 2026-07-21
+        duration: 2
+      - name: 実装
+        assignee: 鈴木
+        start: 2026-07-23
+        duration: 6
+      - name: 試験
+        assignee: 加藤
+        start: 2026-07-31
+        duration: 3
+      - name: 受け入れ試験
+        assignee: 田中
+        start: 2026-08-05
+        duration: 3
+      - name: リリース
+        assignee: 田中
+        start: 2026-08-10
+        duration: 1
